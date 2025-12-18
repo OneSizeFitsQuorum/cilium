@@ -1012,6 +1012,9 @@ const (
 
 	// RoutingModeTunnel specifies tunneling mode
 	RoutingModeTunnel = "tunnel"
+
+	// RoutingModeHybrid specifies hybrid mode
+	RoutingModeHybrid = "hybrid"
 )
 
 const (
