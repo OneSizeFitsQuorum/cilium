@@ -62,6 +62,14 @@ func registerSubnetWatcher(cfg *option.DaemonConfig, fence regeneration.Fence, s
 				} else {
 					health.OK("subnet-topology dynamic config processed successfully")
 				}
+			} else {
+				sw.logger.Info("Subnet-topology config key not found, clearing subnet entries")
+				if err := sw.processSubnetConfigEntry(dynamicconfig.DynamicConfig{Key: dynamicconfig.Key{Name: SubnetTopologyConfigKey}, Value: ""}); err != nil {
+					sw.logger.Error("Failed to clear subnet entries", logfields.Error, err)
+					health.Degraded("Failed to clear subnet entries", err)
+				} else {
+					health.OK("subnet entries cleared successfully")
+				}
 			}
 
 			// Signal initial sync is complete.
