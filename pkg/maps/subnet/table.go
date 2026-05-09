@@ -10,6 +10,7 @@ import (
 	"net/netip"
 
 	"github.com/cilium/statedb"
+	"github.com/cilium/statedb/index"
 	"github.com/cilium/statedb/reconciler"
 
 	"github.com/cilium/cilium/pkg/bpf"
@@ -103,13 +104,27 @@ func (s SubnetTableEntry) BinaryValue() encoding.BinaryMarshaler {
 	return bpf.StructBinaryMarshaler{Target: &v}
 }
 
-// SubnetLPMIndex is the primary index for SubnetEntry, indexing by Prefix.
+// SubnetPrefixIndex is the primary index for SubnetTableEntry, indexing by
+// the string representation of the prefix. This is required because LPM
+// indices cannot be used as primary indices in statedb.
+var SubnetPrefixIndex = statedb.Index[SubnetTableEntry, string]{
+	Name: "id",
+	FromObject: func(s SubnetTableEntry) index.KeySet {
+		return index.NewKeySet(index.String(s.Key.String()))
+	},
+	FromKey:    index.String,
+	FromString: index.FromString,
+	Unique:     true,
+}
+
+// SubnetLPMIndex is a secondary index for SubnetTableEntry, indexing by Prefix
+// for longest-prefix-match lookups.
 var SubnetLPMIndex = statedb.NetIPPrefixIndex[SubnetTableEntry]{
 	Name: "prefix",
 	FromObject: func(s SubnetTableEntry) iter.Seq[netip.Prefix] {
 		return statedb.Just(s.Key)
 	},
-	Unique: true,
+	Unique: false,
 }
 
 // newSubnetEntryTable creates and registers the subnet entry table in stateDB.
@@ -117,6 +132,7 @@ func newSubnetEntryTable(db *statedb.DB) (statedb.RWTable[SubnetTableEntry], err
 	return statedb.NewTable(
 		db,
 		TableName,
+		SubnetPrefixIndex,
 		SubnetLPMIndex,
 	)
 }
