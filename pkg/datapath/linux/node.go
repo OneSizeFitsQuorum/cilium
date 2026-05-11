@@ -4,12 +4,10 @@
 package linux
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/netip"
 	"sync"
 	"syscall"
 
@@ -18,8 +16,6 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/sets"
-
-	"github.com/cilium/statedb"
 
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/datapath/config"
@@ -37,12 +33,12 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/nodemap"
-	subnetmap "github.com/cilium/cilium/pkg/maps/subnet"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/node/manager"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
+	subnetPkg "github.com/cilium/cilium/pkg/subnet"
 )
 
 const (
@@ -80,8 +76,7 @@ type linuxNodeHandler struct {
 
 	enableEncapsulation func(node *nodeTypes.Node) bool
 
-	db          *statedb.DB
-	subnetTable statedb.Table[subnetmap.SubnetTableEntry]
+	subnetResolver subnetPkg.Resolver
 
 	kprCfg kpr.KPRConfig
 
@@ -94,32 +89,36 @@ var (
 	_ node.IDHandler       = (*linuxNodeHandler)(nil)
 )
 
+// NodeHandlerParams contains the dependencies for NewNodeHandler, injected by hive.
+type NodeHandlerParams struct {
+	cell.In
+
+	Lifecycle          cell.Lifecycle
+	Log                *slog.Logger
+	TunnelConfig       dpTunnel.Config
+	NodeMap            nodemap.MapV2
+	NodeManager        manager.NodeManager
+	NodeConfigNotifier *manager.NodeConfigNotifier
+	KPRCfg             kpr.KPRConfig
+	IPSecAgent         ipsecTypes.Agent
+	LocalNodeStore     *node.LocalNodeStore
+	SubnetResolver     subnetPkg.Resolver `optional:"true"`
+}
+
 // NewNodeHandler returns a new node handler to handle node events and
 // implement the implications in the Linux datapath
-func NewNodeHandler(
-	lifecycle cell.Lifecycle,
-	log *slog.Logger,
-	tunnelConfig dpTunnel.Config,
-	nodeMap nodemap.MapV2,
-	nodeManager manager.NodeManager,
-	nodeConfigNotifier *manager.NodeConfigNotifier,
-	kprCfg kpr.KPRConfig,
-	ipsecAgent ipsecTypes.Agent,
-	localNodeStore *node.LocalNodeStore,
-	db *statedb.DB,
-	subnetTable statedb.Table[subnetmap.SubnetTableEntry],
-) (node.Handler, node.IDHandler) {
+func NewNodeHandler(params NodeHandlerParams) (node.Handler, node.IDHandler) {
 	datapathConfig := DatapathConfiguration{
 		HostDevice:   defaults.HostDevice,
-		TunnelDevice: tunnelConfig.DeviceName(),
+		TunnelDevice: params.TunnelConfig.DeviceName(),
 	}
 
-	handler := newNodeHandler(log, datapathConfig, nodeMap, kprCfg, ipsecAgent, fakeipsec.Config{}, localNodeStore, db, subnetTable)
+	handler := newNodeHandler(params.Log, datapathConfig, params.NodeMap, params.KPRCfg, params.IPSecAgent, fakeipsec.Config{}, params.LocalNodeStore, params.SubnetResolver)
 
-	nodeManager.Subscribe(handler)
-	nodeConfigNotifier.Subscribe(handler)
+	params.NodeManager.Subscribe(handler)
+	params.NodeConfigNotifier.Subscribe(handler)
 
-	lifecycle.Append(cell.Hook{
+	params.Lifecycle.Append(cell.Hook{
 		OnStart: func(_ cell.HookContext) error {
 			handler.RestoreNodeIDs()
 			return nil
@@ -139,8 +138,7 @@ func newNodeHandler(
 	ipsecAgent ipsecTypes.Agent,
 	ipsecCfg ipsecTypes.Config,
 	localNodeStore *node.LocalNodeStore,
-	db *statedb.DB,
-	subnetTable statedb.Table[subnetmap.SubnetTableEntry],
+	subnetResolver subnetPkg.Resolver,
 ) *linuxNodeHandler {
 	return &linuxNodeHandler{
 		log:                  log,
@@ -157,8 +155,7 @@ func newNodeHandler(
 		kprCfg:               kprCfg,
 		ipsecAgent:           ipsecAgent,
 		ipsecCfg:             ipsecCfg,
-		db:                   db,
-		subnetTable:          subnetTable,
+		subnetResolver:       subnetResolver,
 	}
 }
 
@@ -892,55 +889,10 @@ func (n *linuxNodeHandler) hybridMode() bool {
 // Nodes in the same subnet group use native routing; nodes in different groups
 // ,or not found in any group) require tunnel encapsulation.
 func (n *linuxNodeHandler) nodeRequiresTunnelRoute(remoteNode *nodeTypes.Node) bool {
-	if remoteNode == nil {
+	if n.subnetResolver == nil {
 		return true
 	}
-
-	remoteIP := remoteNode.GetNodeIP(false) // IPv4
-	if remoteIP == nil {
-		remoteIP = remoteNode.GetNodeIP(true) // IPv6
-	}
-	if remoteIP == nil {
-		return true
-	}
-
-	ln, err := n.localNodeStore.Get(context.Background())
-	if err != nil {
-		return true
-	}
-	localIP := ln.GetNodeIP(false)
-	if localIP == nil {
-		localIP = ln.GetNodeIP(true) // IPv6
-	}
-	if localIP == nil {
-		return true
-	}
-
-	localAddr, ok1 := netip.AddrFromSlice(localIP)
-	remoteAddr, ok2 := netip.AddrFromSlice(remoteIP)
-	if !ok1 || !ok2 {
-		return true
-	}
-
-	localGroupID := n.lookupSubnetID(localAddr)
-	remoteGroupID := n.lookupSubnetID(remoteAddr)
-
-	// Same non-zero group = native routing, otherwise tunnel is required.
-	return localGroupID != remoteGroupID || localGroupID == 0
-}
-
-// lookupSubnetID returns the subnet group identity for the given IP address
-// by iterating the subnet topology table. Returns 0 if not found.
-func (n *linuxNodeHandler) lookupSubnetID(addr netip.Addr) uint32 {
-	if n.db == nil || n.subnetTable == nil {
-		return 0
-	}
-	txn := n.db.ReadTxn()
-	entry, _, found := n.subnetTable.Get(txn, subnetmap.SubnetLPMIndex.Query(addr))
-	if found {
-		return entry.Value
-	}
-	return 0
+	return n.subnetResolver.RequiresTunnelRoute(remoteNode)
 }
 
 func (n *linuxNodeHandler) OverrideEnableEncapsulation(fn func(*nodeTypes.Node) bool) {

@@ -19,6 +19,7 @@ import (
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
+	subnetPkg "github.com/cilium/cilium/pkg/subnet"
 	"github.com/cilium/cilium/pkg/time"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
@@ -51,7 +52,7 @@ type Notifier interface {
 type NodeManager interface {
 	Notifier
 
-	// GetNodes returns a copy of all the nodes as a map from Identity to Node.
+	// GetNodes returns a copy of all nodes as a map from Identity to Node.
 	GetNodes() map[types.Identity]types.Node
 
 	// GetNodeIdentities returns a list of all node identities store in node
@@ -97,9 +98,10 @@ func newAllNodeManager(in struct {
 	Devices        statedb.Table[*tables.Device]
 	WGConfig       wgTypes.Config
 	LocalNodeStore *node.LocalNodeStore
+	SubnetResolver subnetPkg.Resolver `optional:"true"`
 },
 ) (NodeManager, error) {
-	mngr, err := New(in.Logger, option.Config, in.TunnelConf, in.IPCache, in.IPSetMgr, in.IPSetFilter, in.NodeMetrics, in.Health, in.JobGroup, in.DB, in.Devices, in.WGConfig, in.LocalNodeStore)
+	mngr, err := New(in.Logger, option.Config, in.TunnelConf, in.IPCache, in.IPSetMgr, in.IPSetFilter, in.NodeMetrics, in.Health, in.JobGroup, in.DB, in.Devices, in.WGConfig, in.LocalNodeStore, in.SubnetResolver)
 	if err != nil {
 		return nil, err
 	}

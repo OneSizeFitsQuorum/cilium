@@ -49,6 +49,7 @@ import (
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
+	subnetPkg "github.com/cilium/cilium/pkg/subnet"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 	"github.com/cilium/cilium/pkg/wireguard/types"
@@ -177,6 +178,10 @@ type manager struct {
 	wgConfig types.Config
 
 	localNodeStore *node.LocalNodeStore
+
+	// subnetResolver determines topology group membership for hybrid routing.
+	// Injected only when routingMode is hybrid; nil otherwise.
+	subnetResolver subnetPkg.Resolver
 }
 
 // Subscribe subscribes the given node handler to node events.
@@ -275,6 +280,7 @@ func New(
 	devices statedb.Table[*tables.Device],
 	wgCfg types.Config,
 	localNodeStore *node.LocalNodeStore,
+	subnetResolver subnetPkg.Resolver,
 ) (*manager, error) {
 	if ipsetFilter == nil {
 		ipsetFilter = func(*nodeTypes.Node) bool { return false }
@@ -300,6 +306,7 @@ func New(
 		prefixClusterMutatorFn: func(node *nodeTypes.Node) []cmtypes.PrefixClusterOpts { return nil },
 		wgConfig:               wgCfg,
 		localNodeStore:         localNodeStore,
+		subnetResolver:         subnetResolver,
 	}
 
 	return m, nil
@@ -730,6 +737,10 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		if n.Cluster != m.conf.ClusterName {
 			endpointFlags.SetRemoteCluster(true)
 		}
+		// Hybrid mode: set SkipTunnel for same-group node IPs.
+		if m.conf.RoutingMode == option.RoutingModeHybrid && !n.IsLocal() && m.subnetResolver != nil {
+			endpointFlags.SetSkipTunnel(m.subnetResolver.SameGroup(&n))
+		}
 
 		// We expect the node manager to have a source of either Kubernetes,
 		// CustomResource, or KVStore. Prioritize the KVStore source over the
@@ -786,15 +797,20 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 	// the nodeIP as the tunnel endpoint (no tunnel endpoint fallback is needed
 	// for the local node).
 	if !n.IsLocal() {
+		skipTunnel := false
+		if m.conf.RoutingMode == option.RoutingModeHybrid && m.subnetResolver != nil {
+			skipTunnel = m.subnetResolver.SameGroup(&n)
+		}
+
 		ipv4PodCIDRs := n.GetIPv4AllocCIDRs()
 		ipv6PodCIDRs := n.GetIPv6AllocCIDRs()
 
 		mu := make([]ipcache.MU, 0, len(ipv4PodCIDRs)+len(ipv6PodCIDRs))
-		for entry := range m.podCIDREntries(n.Source, resource, m.cidrsToPrefixesCluster(&n, ipv4PodCIDRs...), nodeIP, n.EncryptionKey) {
+		for entry := range m.podCIDREntries(n.Source, resource, m.cidrsToPrefixesCluster(&n, ipv4PodCIDRs...), nodeIP, n.EncryptionKey, skipTunnel) {
 			mu = append(mu, entry)
 			podCIDRsAdded = append(podCIDRsAdded, entry.Prefix.AsPrefix())
 		}
-		for entry := range m.podCIDREntries(n.Source, resource, m.cidrsToPrefixesCluster(&n, ipv6PodCIDRs...), nodeIP, n.EncryptionKey) {
+		for entry := range m.podCIDREntries(n.Source, resource, m.cidrsToPrefixesCluster(&n, ipv6PodCIDRs...), nodeIP, n.EncryptionKey, skipTunnel) {
 			mu = append(mu, entry)
 			podCIDRsAdded = append(podCIDRsAdded, entry.Prefix.AsPrefix())
 		}
@@ -929,7 +945,7 @@ func (m *manager) cidrsToPrefixesCluster(n *nodeTypes.Node, cidrs ...*cidr.CIDR)
 	}
 }
 
-func (m *manager) podCIDREntries(source source.Source, resource ipcacheTypes.ResourceID, prefixes iter.Seq[cmtypes.PrefixCluster], tunnelIP netip.Addr, encryptKey uint8) iter.Seq[ipcache.MU] {
+func (m *manager) podCIDREntries(source source.Source, resource ipcacheTypes.ResourceID, prefixes iter.Seq[cmtypes.PrefixCluster], tunnelIP netip.Addr, encryptKey uint8, skipTunnel bool) iter.Seq[ipcache.MU] {
 	return func(yield func(ipcache.MU) bool) {
 		for prefix := range prefixes {
 			if !prefix.IsValid() {
@@ -940,6 +956,15 @@ func (m *manager) podCIDREntries(source source.Source, resource ipcacheTypes.Res
 				worldLabelForPrefix(prefix.AsPrefix()),
 				ipcacheTypes.TunnelPeer{Addr: tunnelIP},
 				ipcacheTypes.EncryptKey(encryptKey),
+			}
+
+			// Only include EndpointFlags in hybrid mode when the resolver is available.
+			// This ensures flag_skip_tunnel is explicitly set (with isInit=true)
+			// so IPCache metadata flattening correctly handles updates.
+			if m.conf.RoutingMode == option.RoutingModeHybrid && m.subnetResolver != nil {
+				flags := ipcacheTypes.EndpointFlags{}
+				flags.SetSkipTunnel(skipTunnel)
+				metadata = append(metadata, flags)
 			}
 
 			if !yield(ipcache.MU{
@@ -1016,6 +1041,9 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 		if oldNode.Cluster != m.conf.ClusterName {
 			oldEndpointFlags.SetRemoteCluster(true)
 		}
+		if m.conf.RoutingMode == option.RoutingModeHybrid && !oldNode.IsLocal() && m.subnetResolver != nil {
+			oldEndpointFlags.SetSkipTunnel(m.subnetResolver.SameGroup(&oldNode))
+		}
 
 		m.ipcache.RemoveMetadata(oldPrefixCluster, resource,
 			oldNodeLabels,
@@ -1032,17 +1060,22 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 
 	// Remove old pod CIDR fallback entries from IPCache
 	if !oldNode.IsLocal() {
+		oldSkipTunnel := false
+		if m.conf.RoutingMode == option.RoutingModeHybrid && m.subnetResolver != nil {
+			oldSkipTunnel = m.subnetResolver.SameGroup(&oldNode)
+		}
+
 		oldIPv4PodCIDRs := oldNode.GetIPv4AllocCIDRs()
 		oldIPv6PodCIDRs := oldNode.GetIPv6AllocCIDRs()
 
 		mu := make([]ipcache.MU, 0, len(oldIPv4PodCIDRs)+len(oldIPv6PodCIDRs))
-		for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, oldIPv4PodCIDRs...), oldNodeIP, oldNode.EncryptionKey) {
+		for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, oldIPv4PodCIDRs...), oldNodeIP, oldNode.EncryptionKey, oldSkipTunnel) {
 			if slices.Contains(podCIDRsAdded, entry.Prefix.AsPrefix()) {
 				continue
 			}
 			mu = append(mu, entry)
 		}
-		for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, oldIPv6PodCIDRs...), oldNodeIP, oldNode.EncryptionKey) {
+		for entry := range m.podCIDREntries(oldNode.Source, resource, m.cidrsToPrefixesCluster(&oldNode, oldIPv6PodCIDRs...), oldNodeIP, oldNode.EncryptionKey, oldSkipTunnel) {
 			if slices.Contains(podCIDRsAdded, entry.Prefix.AsPrefix()) {
 				continue
 			}

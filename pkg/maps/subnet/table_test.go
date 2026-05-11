@@ -14,7 +14,7 @@ import (
 
 func TestSubnetTableCreation(t *testing.T) {
 	db := statedb.New()
-	tbl, err := newSubnetEntryTable(db)
+	tbl, err := NewSubnetEntryTable(db)
 	require.NoError(t, err, "Creating subnet table should not panic")
 
 	wTx := db.WriteTxn(tbl)
@@ -74,7 +74,7 @@ func TestSubnetTableCreation(t *testing.T) {
 
 func TestSubnetTableDeleteAll(t *testing.T) {
 	db := statedb.New()
-	tbl, err := newSubnetEntryTable(db)
+	tbl, err := NewSubnetEntryTable(db)
 	require.NoError(t, err)
 
 	wTx := db.WriteTxn(tbl)

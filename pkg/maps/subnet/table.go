@@ -127,8 +127,8 @@ var SubnetLPMIndex = statedb.NetIPPrefixIndex[SubnetTableEntry]{
 	Unique: false,
 }
 
-// newSubnetEntryTable creates and registers the subnet entry table in stateDB.
-func newSubnetEntryTable(db *statedb.DB) (statedb.RWTable[SubnetTableEntry], error) {
+// NewSubnetEntryTable creates and registers the subnet entry table in stateDB.
+func NewSubnetEntryTable(db *statedb.DB) (statedb.RWTable[SubnetTableEntry], error) {
 	return statedb.NewTable(
 		db,
 		TableName,

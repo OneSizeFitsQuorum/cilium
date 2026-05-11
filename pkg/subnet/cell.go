@@ -8,28 +8,36 @@ import (
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
+	"github.com/cilium/statedb"
 
 	"github.com/cilium/cilium/pkg/dynamicconfig"
+	subnetTable "github.com/cilium/cilium/pkg/maps/subnet"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 )
 
-// Cell provides the subnet watcher functionality
+// Cell provides the subnet watcher and resolver functionality
 var Cell = cell.Module(
 	"subnet",
-	"Subnet watcher and management",
+	"Subnet watcher resolver and management",
 
 	cell.Config(DefaultConfig),
 
 	cell.Provide(
 		newSubnetWatcher,
+		newResolver,
 	),
 
 	cell.Invoke(
 		registerSubnetWatcher,
 	),
 )
+
+func newResolver(db *statedb.DB, subnetTable statedb.Table[subnetTable.SubnetTableEntry], localNodeStore *node.LocalNodeStore) Resolver {
+	return NewResolver(db, subnetTable, localNodeStore)
+}
 
 func registerSubnetWatcher(cfg *option.DaemonConfig, fence regeneration.Fence, sw *SubnetWatcher) {
 	if cfg.RoutingMode != option.RoutingModeHybrid {

@@ -56,7 +56,7 @@ func TestHybridMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			nh := newNodeHandler(log, DatapathConfiguration{HostDevice: "test"}, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, nil, nil)
+			nh := newNodeHandler(log, DatapathConfiguration{HostDevice: "test"}, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, nil)
 			nh.NodeConfigurationChanged(config.Config{
 				EnableEncapsulation:   tt.enableEncap,
 				RequiresNativeRouting: tt.requiresNative,
@@ -69,7 +69,7 @@ func TestHybridMode(t *testing.T) {
 func TestNodeRequiresTunnelRouteNil(t *testing.T) {
 	log := hivetest.Logger(t)
 	lns := node.NewTestLocalNodeStore(node.LocalNode{})
-	nh := newNodeHandler(log, DatapathConfiguration{HostDevice: "test"}, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, nil, nil)
+	nh := newNodeHandler(log, DatapathConfiguration{HostDevice: "test"}, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, nil)
 	nh.NodeConfigurationChanged(config.Config{
 		EnableEncapsulation:   true,
 		RequiresNativeRouting: true,
@@ -86,7 +86,7 @@ func TestNodeRequiresTunnelRouteNoIP(t *testing.T) {
 			Name: "local",
 		},
 	})
-	nh := newNodeHandler(log, DatapathConfiguration{HostDevice: "test"}, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, nil, nil)
+	nh := newNodeHandler(log, DatapathConfiguration{HostDevice: "test"}, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, nil)
 	nh.NodeConfigurationChanged(config.Config{
 		EnableEncapsulation:   true,
 		RequiresNativeRouting: true,
@@ -107,7 +107,7 @@ func TestNodeRequiresTunnelRouteNoDB(t *testing.T) {
 			},
 		},
 	})
-	nh := newNodeHandler(log, DatapathConfiguration{HostDevice: "test"}, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, nil, nil)
+	nh := newNodeHandler(log, DatapathConfiguration{HostDevice: "test"}, nil, kpr.KPRConfig{}, &fakeipsec.Agent{}, fakeipsec.Config{}, lns, nil)
 	nh.NodeConfigurationChanged(config.Config{
 		EnableEncapsulation:   true,
 		RequiresNativeRouting: true,
