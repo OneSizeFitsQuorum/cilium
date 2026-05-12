@@ -100,11 +100,11 @@ func newAllNodeManager(in struct {
 	LocalNodeStore *node.LocalNodeStore
 	SubnetResolver subnetPkg.Resolver `optional:"true"`
 },
-) (NodeManager, error) {
+) (NodeManager, subnetPkg.NodeRefresher, error) {
 	mngr, err := New(in.Logger, option.Config, in.TunnelConf, in.IPCache, in.IPSetMgr, in.IPSetFilter, in.NodeMetrics, in.Health, in.JobGroup, in.DB, in.Devices, in.WGConfig, in.LocalNodeStore, in.SubnetResolver)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	in.Lifecycle.Append(mngr)
-	return mngr, nil
+	return mngr, mngr, nil
 }

@@ -2252,6 +2252,13 @@ func (c *DaemonConfig) Validate(vp *viper.Viper) error {
 			c.RoutingMode, RoutingModeTunnel, RoutingModeNative, RoutingModeHybrid)
 	}
 
+	if c.RoutingMode == RoutingModeHybrid {
+		if !c.EnableAutoDirectRouting {
+			return fmt.Errorf("hybrid routing mode requires --%s to be enabled",
+				EnableAutoDirectRoutingName)
+		}
+	}
+
 	cinfo := clustermeshTypes.ClusterInfo{
 		ID:                   c.ClusterID,
 		Name:                 c.ClusterName,

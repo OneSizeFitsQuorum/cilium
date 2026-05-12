@@ -16,7 +16,14 @@ import (
 	"github.com/cilium/cilium/pkg/dynamicconfig"
 	subnetTable "github.com/cilium/cilium/pkg/maps/subnet"
 	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 )
+
+// NodeRefresher refreshes node IPCache metadata. NodeManager satisfies this.
+type NodeRefresher interface {
+	GetNodes() map[nodeTypes.Identity]nodeTypes.Node
+	NodeUpdated(n nodeTypes.Node)
+}
 
 type watcherParams struct {
 	cell.In
@@ -27,6 +34,7 @@ type watcherParams struct {
 	DB                 *statedb.DB
 	JobGroup           job.Group
 	NodeHandler        node.Handler
+	NodeRefresher      NodeRefresher `optional:"true"`
 }
 
 type SubnetWatcher struct {
@@ -36,6 +44,7 @@ type SubnetWatcher struct {
 	db                 *statedb.DB
 	jobGroup           job.Group
 	nodeHandler        node.Handler
+	nodeRefresher      NodeRefresher
 }
 
 func newSubnetWatcher(params watcherParams) *SubnetWatcher {
@@ -46,6 +55,7 @@ func newSubnetWatcher(params watcherParams) *SubnetWatcher {
 		db:                 params.DB,
 		jobGroup:           params.JobGroup,
 		nodeHandler:        params.NodeHandler,
+		nodeRefresher:      params.NodeRefresher,
 	}
 }
 
@@ -73,6 +83,18 @@ func (w *SubnetWatcher) processSubnetConfigEntry(entry dynamicconfig.DynamicConf
 	// Trigger re-evaluation of all node routes based on new topology
 	if w.nodeHandler != nil {
 		w.nodeHandler.AllNodeValidateImplementation()
+	}
+
+	// Re-upsert all remote nodes to refresh IPCache flag_skip_tunnel.
+	// The resolver now reads the updated subnet table, so SameGroup()
+	// returns correct results. NodeUpdated will recompute skipTunnel
+	// and update both route installation and IPCache metadata.
+	if w.nodeRefresher != nil {
+		for _, n := range w.nodeRefresher.GetNodes() {
+			if !n.IsLocal() {
+				w.nodeRefresher.NodeUpdated(n)
+			}
+		}
 	}
 
 	return nil
